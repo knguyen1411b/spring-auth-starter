@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8"/>
+    <title>Kích hoạt tài khoản</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            background: #f5f6fa;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        .card {
+            background: white;
+            padding: 32px;
+            border-radius: 12px;
+            width: 360px;
+            text-align: center;
+            box-shadow: 0 10px 25px rgba(0,0,0,.1);
+        }
+        .success { color: #2ecc71; }
+        .error { color: #e74c3c; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2>Kích hoạt tài khoản</h2>
+    <p id="message">Đang xử lý...</p>
+</div>
+
+<script th:inline="javascript">
+    const token = /*[[${token}]]*/ "";
+
+    fetch("/api/v1/auth/activate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token })
+    })
+        .then(res => {
+            if (!res.ok) throw new Error("Activation failed");
+            return res.json();
+        })
+        .then(data => {
+            document.getElementById("message").innerHTML =
+                `<span class="success">✅ Tài khoản đã được kích hoạt</span>`;
+        })
+        .catch(err => {
+            document.getElementById("message").innerHTML =
+                `<span class="error">❌ Link không hợp lệ hoặc đã hết hạn</span>`;
+        });
+</script>
+
+</body>
+</html>

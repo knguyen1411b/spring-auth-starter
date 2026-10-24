@@ -1,0 +1,13 @@
+spring:
+  config:
+    activate:
+      on-profile: prod
+application:
+  public-base-url: ${APP_PUBLIC_BASE_URL}
+  cors-origins: ${CORS_ALLOWED_ORIGINS}
+  mail-from: ${MAIL_FROM}
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false

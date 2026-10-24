@@ -1,0 +1,16 @@
+# Only send files needed to build the production application.
+**
+!gradlew
+!build.gradle
+!settings.gradle
+!gradle/
+!gradle/**
+!src/
+!src/main/
+!src/main/**
+!LICENSE
+# Keep private material out even if it is placed below src/main.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key

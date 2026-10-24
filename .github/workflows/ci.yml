@@ -1,0 +1,177 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Java 21 / Gradle / PostgreSQL tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
+        with:
+          validate-wrappers: true
+      - name: Check formatting, run PostgreSQL integration tests, and package
+        run: bash ./gradlew --no-daemon spotlessCheck build
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-reports
+          path: |
+            build/reports/tests/test
+            build/test-results/test
+          if-no-files-found: ignore
+          retention-days: 14
+
+  docker:
+    name: Docker Compose smoke test
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: spring-auth-ci
+      PORT: '0'
+      POSTGRES_PORT: '0'
+      MAILPIT_SMTP_PORT: '0'
+      MAILPIT_UI_PORT: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create disposable configuration
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import secrets
+          text = Path('.env.example').read_text()
+          text = text.replace('JWT_SECRET=', 'JWT_SECRET=' + secrets.token_hex(64), 1)
+          Path('.env').write_text(text)
+          PY
+      - name: Validate Compose and build the production image
+        run: |
+          docker compose --profile app config --quiet
+          docker compose --profile app up --build --detach
+      - name: Verify health, authentication, and production defaults
+        run: |
+          port="$(docker compose port app 8080 | cut -d: -f2)"
+          base="http://127.0.0.1:${port}"
+          mailpit_port="$(docker compose port mailpit 8025 | cut -d: -f2)"
+          python3 - "${base}" "http://127.0.0.1:${mailpit_port}" <<'PY'
+          import json
+          import re
+          import secrets
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+          def request(base, path, body=None, access=None, method=None, expected=200):
+              headers = {}
+              if body is not None:
+                  headers["Content-Type"] = "application/json"
+              if access:
+                  headers["Authorization"] = "Bearer " + access
+              req = urllib.request.Request(
+                  base + path,
+                  data=json.dumps(body).encode() if body is not None else None,
+                  headers=headers,
+                  method=method,
+              )
+              try:
+                  response = urllib.request.urlopen(req, timeout=5)
+              except urllib.error.HTTPError as error:
+                  response = error
+              with response:
+                  assert response.code == expected, f"{path}: expected {expected}, got {response.code}"
+                  raw = response.read()
+                  return json.loads(raw) if raw else None
+
+
+          def email_token(mailpit, email, pattern):
+              deadline = time.monotonic() + 20
+              while time.monotonic() < deadline:
+                  inbox = request(mailpit, "/api/v1/messages")
+                  for item in inbox["messages"]:
+                      if not any(to["Address"] == email for to in item.get("To", [])):
+                          continue
+                      message = request(mailpit, "/api/v1/message/" + item["ID"])
+                      match = re.search(pattern, message["Text"])
+                      if match:
+                          return match.group(1)
+                  time.sleep(0.25)
+              raise AssertionError("Expected email link was not delivered to Mailpit")
+
+
+          base, mailpit = sys.argv[1:]
+
+          deadline = time.monotonic() + 120
+          while True:
+              try:
+                  assert request(base, "/actuator/health") == {"status": "UP"}
+                  break
+              except (OSError, AssertionError):
+                  if time.monotonic() >= deadline:
+                      raise
+                  time.sleep(2)
+          request(base, "/api/v1/auth/profile", expected=401)
+          request(base, "/v3/api-docs", expected=404)
+          print("PASS: health, anonymous access rejection, and disabled production API docs")
+
+          username = "smoke_" + secrets.token_hex(6)
+          email = username + "@example.test"
+          password, new_password = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
+          request(base, "/api/v1/auth/sign-up", {
+              "username": username, "email": email, "password": password, "fullName": "Smoke Test"
+          }, expected=201)
+          token = email_token(mailpit, email, r"/activate\?token=([A-Za-z0-9_-]+)")
+          request(base, "/api/v1/auth/activate", {"token": token})
+          device = "ci-browser"
+          tokens = request(base, "/api/v1/auth/sign-in", {
+              "username": username, "password": password, "deviceId": device
+          })["data"]
+          request(base, "/api/v1/auth/profile", access=tokens["accessToken"])
+          print("PASS: registration, real SMTP activation email, sign-in, and authenticated profile")
+
+          known = request(base, "/api/v1/auth/forgot-password", {"email": email})
+          unknown = request(base, "/api/v1/auth/forgot-password", {"email": "missing_" + email})
+          assert known == unknown
+          token = email_token(mailpit, email, r"/reset-password#token=([A-Za-z0-9_-]+)")
+          request(base, "/api/v1/auth/reset-password", {"token": token, "newPassword": new_password})
+          request(base, "/api/v1/auth/reset-password", {"token": token, "newPassword": password}, expected=401)
+          request(base, "/api/v1/auth/profile", access=tokens["accessToken"], expected=401)
+          request(base, "/api/v1/auth/refresh", {
+              "refreshToken": tokens["refreshToken"], "deviceId": device
+          }, expected=401)
+          fresh = request(base, "/api/v1/auth/sign-in", {
+              "username": username, "password": new_password, "deviceId": device
+          })["data"]
+          request(base, "/api/v1/auth/sessions", access=fresh["accessToken"], method="DELETE")
+          request(base, "/api/v1/auth/profile", access=fresh["accessToken"], expected=401)
+          print("PASS: recovery email, one-time reset, new password, and immediate access/refresh revocation")
+          PY
+          uid="$(docker compose exec --no-TTY app id -u)"
+          test "${uid}" -gt 0
+      - name: Show container logs on failure
+        if: failure()
+        run: docker compose --profile app logs --no-color
+      - name: Remove disposable containers and volumes
+        if: always()
+        run: docker compose --profile app down --volumes --remove-orphans

@@ -1,0 +1,11 @@
+spring:
+  mail:
+    host: localhost
+    port: 1025
+  dotenv:
+    enabled: false
+application:
+  public-base-url: http://localhost:8080
+  cors-origins: http://localhost:3000
+cloudinary:
+  enabled: false
